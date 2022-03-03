@@ -227,7 +227,7 @@ static bool nakamori_is_supported_system_table(const char *db,
   handler::ha_open() in handler.cc
 */
 
-int ha_nakamori::open(const char *name, int, uint, const dd::Table *) {
+int ha_nakamori::open(const char *name, int, uint, const dd::Table *) {  
   DBUG_TRACE;
   if (!(share = get_share())) return 1;
   thr_lock_data_init(&share->lock, &lock, nullptr);
@@ -321,23 +321,22 @@ int ha_nakamori::encode_query()
   return (buffer.length());
 }
 
-int ha_nakamori::write_row(uchar *) {
-  DBUG_TRACE;
-  /*
-    Example of a successful write_row. We don't store the data
-    anywhere; they are thrown away. A real implementation will
-    probably need to do something with 'buf'. We report a success
-    here, to pretend that the insert was successful.
-  */
-  ha_statistic_increment(&System_status_var::ha_write_count);
-
-  if( (write_file = my_open(data_file_name, O_RDWR | O_APPEND, MYF(MY_WME))) == -1) {
-    close();
-    return -1;
-  }
-  int size = encode_query();
-  if ((my_write(write_file, pointer_cast<const uchar *> (buffer.ptr()), size, MYF(0))) < 0)// データファイルへの書き込み
-    return -1;  
+int ha_nakamori::write_row(uchar *) {  
+  
+  encode_query();
+  auto row_id = ???
+    
+  // write_row == INSERT
+  // INSERT IF NOT EXISTS のとき => tx.Write
+  // INSERT のとき => どういう仕様が正しい？すでに存在する場合はエラーを返す？
+  
+  // 1st step
+  auto& tx = myDB.BeginTransaction();
+  
+  auto& exists = tx.Read(row_id);
+  if (exists) return 1; // すでに存在する場合はエラーを返す，という仮定
+  tx.Write(page_id, buffer);
+  tx.EndTransaction();
   return 0;
 }
 
@@ -381,60 +380,22 @@ bool ha_nakamori::primary_key_strcmp(const char *s1, const char *s2){
   }
 }
 
-int ha_nakamori::update_row(const uchar *, uchar *) {
-  DBUG_TRACE;
-  int line = 0;  // 行数
-  bool update_is_successful = false;
-  char arr[100][50];
-  FILE *f;
-
-  f = fopen(data_file_name, "r");
-  if(f == NULL)
-  {
-    printf("load error");
-    return -1;
-  }
-
-  for(int i = 0; i < (int)sizeof(arr)/(int)sizeof(arr[0]) && fgets(arr[i], sizeof(arr[i]), f); i++)
-  {
-    line++;  // テキストファイルの行数
-  }
-  fclose(f);
-
-  f = fopen(data_file_name, "w");
-  if(f == NULL)
-  {
-    printf("load error");
-    return -1;
-  }
-
+int ha_nakamori::update_row(const uchar *, uchar *) {  
   encode_query();
-  buffer.append('\0');
-  // ファイル書き込み
-  for(int i = 0; i < line; i++)
-  {
-    if(primary_key_strcmp(arr[i],(char*)(buffer.ptr())) == false)
-    {
-      fputs(arr[i], f);
-    }
-    else
-    {
-#ifdef INPLACE_UPDATE 
-      fputs((char*)(buffer.ptr()), f);
-#endif
-      update_is_successful = true;
-    }
-  }
   
-  // ファイル閉じる
-  fclose(f);
-  if(!update_is_successful){
-    return -1;
+  // 1st step
+  auto& tx = myDB.BeginTransaction();
+  tx.Write(key, buffer);
+  tx.EndTransaction();
+  
+  // next step
+  auto* tx = getTransaction();
+  if (tx == nullptr){ // まだはじまっていない？
+    tx = myDB.BeginTransaction();
+    setTransactionContext(tx, this_transaction_context);
   }
-#ifndef INPLACE_UPDATE
-  if(write_row(new_data) != 0)
-    return 1;
-#endif
+  tx.Write(key, buffer);
+  
   return 0;
 }
 
